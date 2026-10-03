@@ -11,7 +11,7 @@ ifndef GCC_VER
     GCC_VER=$(shell echo $(UNAME) $(HOME) | awk '/Darwin/&&/Users.wayne/{V="-6"}END{if(V)print V;else{printf "using default gcc: " > "/dev/null"; exit 1}}')
 endif
 GCC=gcc$(GCC_VER) # gcc gcc-4.2 gcc-6 gcc-7 gcc-8 gcc-9 # Possibilities on Darwin
-CXX=g++$(GXX_VER)
+CXX=g++$(GCC_VER)
 STACKSIZE=$(shell ($(GCC) -v 2>&1; uname -a) | awk '/CYGWIN/{print "-Wl,--stack,83886080"}/gcc-/{actualGCC=1}/Darwin/&&actualGCC{print "-Wl,-stack_size -Wl,0x5000000"}')
 CC=$(GCC) $(OPT) $(GDB) $(DEBUG) -Wno-unused-variable -Wno-unused-but-set-variable -Wall -Wpointer-arith -Wcast-qual -Wcast-align -Wwrite-strings -Wstrict-prototypes -Wshadow $(PG) $(STACKSIZE)
 LIBWAYNE_HOME:=$(shell dirname $(realpath $(firstword $(MAKEFILE_LIST))))
@@ -36,58 +36,61 @@ watch:
 
 libwayne_all: parallel
 	/bin/rm -f *.a src/*.a
-	$(CC) -o bin/intSizes intSizes.c && ./bin/intSizes > include/intSizes.h
+	$(CC) -o bin/intSizes intSizes.c && ./bin/intSizes > include/intSizes.h.new
+	@# Only replace it if it actually changed; misc.h includes it, and almost
+	@# everything includes misc.h, so a new timestamp means a full rebuild.
+	@cmp -s include/intSizes.h.new include/intSizes.h || mv include/intSizes.h.new include/intSizes.h
+	@/bin/rm -f include/intSizes.h.new
 
-	$(MAKE) libwayne_one VARIANT=libwayne       PG_FLAG=    DBG=  NDEBUG_FLAG=          OPT_FLAGS=-O2
-	$(MAKE) libwayne_one VARIANT=libwayne-nd    PG_FLAG=    DBG=  NDEBUG_FLAG=-DNDEBUG  OPT_FLAGS=-O2
-	$(MAKE) libwayne_one VARIANT=libwayne-g     PG_FLAG=    DBG=1 NDEBUG_FLAG=          OPT_FLAGS=
-	$(MAKE) libwayne_one VARIANT=libwayne-pg    PG_FLAG=-pg DBG=  NDEBUG_FLAG=          OPT_FLAGS=-O2
-	$(MAKE) libwayne_one VARIANT=libwayne-pg-nd PG_FLAG=-pg DBG=  NDEBUG_FLAG=-DNDEBUG  OPT_FLAGS=-O2
-	$(MAKE) libwayne_one VARIANT=libwayne-pg-g  PG_FLAG=-pg DBG=1 NDEBUG_FLAG=          OPT_FLAGS=
+	$(MAKE) libwayne_one LIBOUT=libwayne.a       PG_FLAG=    DBG=  NDEBUG_FLAG=          OPT_FLAGS=-O2
+	$(MAKE) libwayne_one LIBOUT=libwayne-nd.a    PG_FLAG=    DBG=  NDEBUG_FLAG=-DNDEBUG  OPT_FLAGS=-O2
+	$(MAKE) libwayne_one LIBOUT=libwayne-g.a     PG_FLAG=    DBG=1 NDEBUG_FLAG=          OPT_FLAGS=
+	$(MAKE) libwayne_one LIBOUT=libwayne-pg.a    PG_FLAG=-pg DBG=  NDEBUG_FLAG=          OPT_FLAGS=-O2
+	$(MAKE) libwayne_one LIBOUT=libwayne-pg-nd.a PG_FLAG=-pg DBG=  NDEBUG_FLAG=-DNDEBUG  OPT_FLAGS=-O2
+	$(MAKE) libwayne_one LIBOUT=libwayne-pg-g.a  PG_FLAG=-pg DBG=1 NDEBUG_FLAG=          OPT_FLAGS=
 
-empty :=
-space := $(empty) $(empty)
+# Which variant is being built, e.g. libwayne-pg-g. LIBOUT is the single source
+# of truth for this: every caller sets LIBOUT and the name follows from it. The
+# -fPIC targets are the one exception and override it, so that they don't end up
+# sharing objects with the static build of the same name.
+VARIANT ?= $(basename $(LIBOUT))
 
-VARIANT := $(subst $(space),-,$(strip \
-	$(if $(PG_FLAG),pg) \
-	$(if $(DBG),g) \
-	$(if $(NDEBUG_FLAG),nd) \
-	$(if $(OPT_FLAGS),$(subst -,,$(OPT_FLAGS))) \
-))
-
-VARIANT := libwayne$(if $(VARIANT),-$(VARIANT),)
+# This variant's object directory. Every variant MUST get its own: if they share
+# one, the first variant's .o files look up to date to all the rest, so each one
+# re-archives the same objects and all six libraries come out identical with
+# nothing reporting an error. Recipes that run inside src/ need an extra ../.
+OBJDIR = build/$(VARIANT)
 
 libwayne_one:
-	mkdir -p build/$(VARIANT)
-	echo "$(strip $(OPT_FLAGS) $(PG_FLAG) $(if $(DBG),-ggdb -DDEBUG=1,$(NDEBUG_FLAG)))" > build/$(VARIANT)/.cflags
+	mkdir -p $(OBJDIR)
+	echo "$(strip $(OPT_FLAGS) $(PG_FLAG) $(if $(DBG),-ggdb -DDEBUG=1,$(NDEBUG_FLAG)))" > $(OBJDIR)/.cflags
 	$(MAKE) -j$(CORES) \
 		'PG=$(PG_FLAG)' \
 		'OPT=$(OPT_FLAGS)' \
 		'GDB=$(if $(DBG),-ggdb)' \
 		'DEBUG=$(if $(DBG),-DDEBUG=1,$(NDEBUG_FLAG))' \
-		'OBJDIR=../build/$(VARIANT)' \
-		'LIBOUT=$(VARIANT).a' \
+		'LIBOUT=$(LIBOUT)' \
 		libwayne
-	/bin/rm -f src/$(VARIANT).a
-	mkdir -p build/.stamps && for o in build/$(VARIANT)/*.o; do touch build/.stamps/$$(basename $${o%.o}).stamp; done
+	/bin/rm -f src/$(LIBOUT)
+	mkdir -p build/.stamps && for o in $(OBJDIR)/*.o; do [ -e "$$o" ] || continue; touch build/.stamps/$$(basename $${o%.o}).stamp; done
 
 parallel: parallel.c
 	$(CC) -o bin/parallel parallel.c
 
 testlib:
-	export LIBWAYNE_HOME=$(LIBWAYNE_HOME); for x in ebm covar stats hash raw_hashmap htree-test avltree-test bintree-test CI graph-sanity tinygraph-sanity graph-weighted circ_buf; do rm -f bin/$$x tests/$$x.o; ( cd tests; $(MAKE) $$x; mv $$x ../bin; IN=/dev/null; [ -f $$x.in ] && IN=$$x.in; cat $$IN | ../bin/$$x $$x.in > /tmp/$$x.test$$$$ 2>&1 || exit 1; cat /tmp/$$x.test$$$$ | if [ -f $$x.out ]; then cmp - $$x.out; else wc; fi; /bin/rm -f /tmp/$$x.test$$$$); done #sim_anneal
+	export LIBWAYNE_HOME=$(LIBWAYNE_HOME); for x in ebm covar stats hash raw_hashmap htree-test avltree-test bintree-test CI graph-sanity tinygraph-sanity graph-weighted circ_buf sim_anneal; do rm -f bin/$$x tests/$$x.o; ( cd tests; $(MAKE) $$x; mv $$x ../bin; IN=/dev/null; [ -f $$x.in ] && IN=$$x.in; cat $$IN | ../bin/$$x $$x.in > /tmp/$$x.test$$$$ 2>&1 || exit 1; cat /tmp/$$x.test$$$$ | if [ -f $$x.out ]; then cmp - $$x.out; else wc; fi; /bin/rm -f /tmp/$$x.test$$$$); done
 
 opt:
-	$(MAKE) 'OPT=-O2' 'DEBUG=-DNDEBUG' 'LIBOUT=libwayne.a' libwayne
+	$(MAKE) 'OPT=-O2' 'LIBOUT=libwayne.a' libwayne
 
 debug:
 	$(MAKE) 'GDB=-ggdb' 'DEBUG=-DDEBUG=1' 'LIBOUT=libwayne-g.a' libwayne
 
 shared-opt:
-	$(MAKE) 'OPT=-O2 -fPIC' 'LIBOUT=libwayne.a' libwayne
+	$(MAKE) 'OPT=-O2 -fPIC' 'LIBOUT=libwayne.a' 'VARIANT=libwayne-pic' libwayne
 
 shared-debug:
-	$(MAKE) 'OPT=-fPIC' 'GDB=-ggdb' 'DEBUG=-DDEBUG=1' 'LIBOUT=libwayne-g.a' libwayne
+	$(MAKE) 'OPT=-fPIC' 'GDB=-ggdb' 'DEBUG=-DDEBUG=1' 'LIBOUT=libwayne-g.a' 'VARIANT=libwayne-pic-g' libwayne
 
 ndebug:
 	$(MAKE) 'OPT=-O2' 'DEBUG=-DNDEBUG=1' 'LIBOUT=libwayne-nd.a' libwayne
@@ -95,7 +98,7 @@ ndebug:
 libwayne:
 	$(MAKE) $(LIBOUT)
 	# add misc.o below since adding nothing fails on Mac M1, and misc.o is pretty much necessary for libwayne to work.
-	[ "$(UNAME)" = Darwin ] || ar r $(LIBOUT) build/$(notdir $(OBJDIR))/misc.o
+	[ "$(UNAME)" = Darwin ] || ar r $(LIBOUT) $(OBJDIR)/misc.o
 
 debug_clean:
 	@$(MAKE) 'GDB=-ggdb' 'DEBUG=-DDEBUG=1' 'LIBOUT=libwayne-g.a' raw_clean
@@ -108,13 +111,14 @@ ndebug_clean:
 
 raw_clean:
 	rm -f make-successful
-	@/bin/rm -f src/*.[oa] $(LIBOUT)
+	@case '$(VARIANT)' in '') ;; *) /bin/rm -rf $(OBJDIR) ;; esac
+	@# src/*.[oad] only matters for trees built before objects moved into build/
+	@/bin/rm -f src/*.[oad] $(LIBOUT) src/$(LIBOUT)
 	@cd C++; $(MAKE) clean
 
 clean:
 	rm -f make-successful
 	rm -rf build
-	@/bin/rm -rf src/libwayne*/
 	@# The following is meant to remove the non-Windows binary, ie stats but not stats.exe.
 	@/bin/rm -f bin/stats bin/raw_hashmap bin/hash
 	@/bin/rm -f *.a src/*.a
@@ -127,6 +131,6 @@ $(LIBOUT): src/$(LIBOUT)
 
 .PHONY: src/$(LIBOUT)
 src/$(LIBOUT):
-	cd src; $(MAKE) -f Makefile.all 'CC=$(CC)' 'LIBOUT=$(LIBOUT)' 'GDB=$(GDB)' 'OBJDIR=$(OBJDIR)' '$(LIBOUT)'
+	cd src; $(MAKE) -f Makefile.all 'CC=$(CC)' 'LIBOUT=$(LIBOUT)' 'GDB=$(GDB)' 'OBJDIR=../$(OBJDIR)' '$(LIBOUT)'
 
 #.PHONY: libwayne-pg-g src/$(LIBOUT)
